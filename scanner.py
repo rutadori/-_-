@@ -99,7 +99,7 @@ if __name__ == "__main__":
     print("🧪 [scanner.py] 모듈 단독 기능 테스트 시작...\n")
 
     # 컴퓨터 내에 실제 존재할 법한 테스트 경로 지정
-    test_path = r"C:\pokeChams"
+    test_path = r"C:\projectTestFile2"
 
     try:
         print(f"🔍 '{test_path}' 폴더 스캔을 시작합니다...")
