@@ -1,225 +1,164 @@
 # =========================================================
-# [1] 파이썬 기본 표준 라이브러리 불러오기 (Import)
+# [gui_app.py] 
+# PySide6 기반 GUI 뷰어 및 백그라운드 스레드 제어 모듈
+# 
+# ---------------------------------------------------------
+# 🌟 [주요 변경 히스토리 및 개선 사항]
+# ---------------------------------------------------------
+# 1. 역할 분리 (Separation of Concerns)
+#    - 기존: GUI 스레드 내에서 AI 통신, 텍스트 파싱, DB 저장을 직접 처리하여 비대했음.
+#    - 최종: 'MainProcessor' 관제탑 도입. GUI는 파일 스캔/경로 탐색만 수행하고, 
+#            실제 AI 분석 및 데이터 처리는 백엔드 모듈로 완벽히 위임(Delegation).
+#
+# 2. 자연어 검색 및 라우팅 (Intent Routing) 추가
+#    - 'SearchQueryParser' 및 'SearchEngine' 결합. 
+#    - 사용자의 자연어 입력을 받아 AI가 의도(@검색, @대화)를 분석하고, 
+#      그에 따라 실시간으로 테이블을 갱신하거나 챗 팝업을 띄우는 라우팅 로직 구현.
+#
+# 3. 윈도우 환경 대응 및 경로 정규화 (Robust Path Handling)
+#    - 경로 깨짐(￥ vs \) 현상 방지: os.path.normpath/abspath 적용으로 안정적 경로 확보.
+#    - 시스템 환경에 관계없이 일관된 파일 존재 여부 검사 및 실행 지원.
+#
+# 4. 프로세스 잠금(WinError 32) 원천 차단
+#    - 기존: os.remove()로 DB 파일을 물리 삭제하여 파일 점유 에러 발생.
+#    - 최종: SQL DELETE 문 및 sqlite_sequence 초기화 방식으로 DB를 리셋하여 
+#            프로세스 점유 없이 안전하게 데이터만 초기화하도록 개선.
 # =========================================================
-import sys         # 파이썬 시스템 및 명령줄 인자 관리 (프로그램 종료 시 필요)
-import os          # 파일 경로 접근, 폴더 탐색, 파일 메타데이터(크기, 수정일) 추출 모듈
-import sqlite3     # 로컬 경량 데이터베이스(SQLite) 제어 모듈
-import datetime    # 타임스탬프(숫자) 형태의 날짜를 읽기 쉬운 문자열로 변환하는 모듈
-import io          # 바이너리 바이트 스트림 처리를 위한 모듈
 
-# =========================================================
-# [2] 외부 제3자 라이브러리 불러오기 (External Libraries)
-# =========================================================
-import ollama                # 컴퓨터에 설치된 로컬 LLM(Ollama) 인공지능과 통신하는 모듈
-from pypdf import PdfReader  # PDF 파일 내부의 텍스트 원문을 읽어내고 추출하는 모듈
-from PIL import Image        # 이미지 파일 읽기 및 바이트 변환 (한글 경로 지원용)
-import numpy as np          # PIL -> OpenCV/Bytes 호환용
+import sys         
+import os          
+import sqlite3     
+import json        # 🌟 [추가] AI 파싱 및 검색 결과 JSON 처리용
 
-# =========================================================
-# [3] PySide6 (Qt GUI 그래픽 화면 제작 라이브러리) 부품 불러오기
-# =========================================================
 from PySide6.QtWidgets import (
-    QApplication,    # PyQt/PySide 앱 전체 관리자 (모든 Qt 앱은 이게 필수)
-    QMainWindow,     # 메인 창(Window) 틀을 만들어주는 클래스
-    QWidget,         # 버튼, 테이블 등을 배치할 기본 레이아웃 바탕화면판
-    QVBoxLayout,     # 위에서 아래(세로)로 부품들을 차곡차곡 정렬하는 레이아웃
-    QHBoxLayout,     # 왼쪽에서 오른쪽(가로)으로 부품들을 차곡차곡 정렬하는 레이아웃
-    QPushButton,     # 마우스로 클릭할 수 있는 버튼 부품
-    QTableWidget,    # 엑셀처럼 표 형태로 데이터를 보여주는 테이블 부품
-    QTableWidgetItem, # 테이블의 칸(셀) 하나하나에 들어갈 데이터 객체
-    QFileDialog,     # 컴퓨터 내부의 폴더/파일을 선택할 수 있는 탐색기 창 부품
-    QLabel,          # 화면에 텍스트 문구를 보여주는 라벨 부품
-    QHeaderView,     # 테이블의 열(Column) 헤더 너비 및 자동 조절 정책 관리자
-    QMessageBox      # 경고창, 완료창, 확인 알림창을 띄워주는 메시지 박스
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QTableWidget, QTableWidgetItem, QFileDialog,
+    QLabel, QHeaderView, QMessageBox, QLineEdit  # 🌟 [추가] 자연어 입력용 QLineEdit
 )
-from PySide6.QtCore import Qt, QUrl, QThread, Signal # 스레드, 신호, 유틸리티 기능
-from PySide6.QtGui import QDesktopServices           # 시스템 기본 프로그램으로 파일 열기 기능
+from PySide6.QtCore import Qt, QUrl, QThread, Signal 
+from PySide6.QtGui import QDesktopServices           
 
-# 백엔드 DB 접속 객체나 비즈니스 로직이 담긴 커스텀 서비스 모듈 불러오기
+# ---------------------------------------------------------
+# 백엔드 및 모듈 연동 (역할 분리 및 파이프라인 통합)
+# ---------------------------------------------------------
 from service import BackendService
+from file_pipeline import TextExtractor, FileAnalyzer
+from main_processor import MainProcessor  # 🌟 [변경] 통합 백엔드 관제탑 모듈 결합
+
+# 자연어 파서 및 검색 엔진 안전 로딩
+try:
+    from query_parser import SearchQueryParser
+    HAS_QUERY_PARSER = True
+except ImportError:
+    HAS_QUERY_PARSER = False
+
+try:
+    from search_engine import SearchEngine
+    HAS_SEARCH_ENGINE = True
+except ImportError:
+    HAS_SEARCH_ENGINE = False
 
 
 # =========================================================
-# [4] 백그라운드 스레드 클래스 (FolderScanAndTagWorker)
+# [4] 폴더 스캔 및 태깅 백그라운드 스레드 (FolderScanAndTagWorker)
 # =========================================================
 class FolderScanAndTagWorker(QThread):
-    progress = Signal(str)  # 현재 스캔 및 분석 진행 상황 문구를 메인 화면으로 전달
-    finished = Signal()     # 모든 파일의 스캔 및 태깅이 끝났음을 알리는 신호
-    error = Signal(str)     # 작업 중 에러가 발생했을 때 에러 메시지를 전달하는 신호
+    progress = Signal(str)  
+    finished = Signal()     
+    error = Signal(str)     
 
-    def __init__(self, folder_path, service, text_model="qwen2.5:3b", vision_model="llava"):
-        """스레드가 생성될 때 필요한 초기 데이터를 전달받는 생성자 함수"""
+    def __init__(self, folder_path, main_processor: MainProcessor, service): # 🌟 [변경] service 단독에서 MainProcessor 주입 방식으로 변경
         super().__init__()
-        self.folder_path = folder_path  # 스캔할 폴더의 경로
-        self.service = service          # 백엔드 서비스 객체
-        self.text_model = text_model    # 텍스트 문서용 Ollama 모델 이름
-        self.vision_model = vision_model# 이미지 용 Ollama 비전 모델 이름 (안정적인 llava)
+        self.folder_path = folder_path
+        self.main_processor = main_processor
+        self.service = service
 
     def run(self):
-        """worker.start()가 호출되면 백그라운드에서 실제 실행되는 메인 로직 함수"""
         try:
-            # 1. 스캔 대상 확장자 (텍스트 + PDF + 이미지)
-            text_exts = ('.txt', '.pdf')
-            image_exts = ('.jpg', '.jpeg', '.png', '.webp', '.bmp')
-            valid_extensions = text_exts + image_exts
+            # 🌟 [확장] 문서, 이미지뿐만 아니라 미디어(.mp3, .mp4 등) 확장자까지 대폭 수용
+            valid_extensions = (
+                '.txt', '.pdf', '.docx', '.xlsx', '.pptx', '.hwp', '.hwpx',
+                '.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif',
+                '.mp3', '.mp4', '.wav', '.m4a', '.mkv', '.avi'
+            )
             
             files_to_process = []
-            
-            # 2. 폴더 탐색 (하위 폴더까지 복사/스캔)
             for root, _, files in os.walk(self.folder_path):
                 for file in files:
                     if file.lower().endswith(valid_extensions):
-                        files_to_process.append(os.path.join(root, file))
+                        full_path = os.path.join(root, file)
+                        # 🌟 [핵심] 경로 깨짐 현상 및 슬래시 정규화 처리
+                        clean_path = full_path.replace('￥', '/').replace('\\', '/')
+                        clean_path = os.path.abspath(os.path.normpath(clean_path))
+                        files_to_process.append(clean_path)
 
             if not files_to_process:
-                self.error.emit("스캔할 지원 파일(.txt, .pdf, 이미지)이 선택한 폴더에 없습니다.")
+                self.error.emit("스캔할 지원 파일이 선택한 폴더에 없습니다.")
                 return
 
             total_count = len(files_to_process)
 
-            # 3. 파일 순회 분석
+            # 🌟 [변경] 기존에 스레드 안에서 직접 ollama를 호출하던 로직을 제거하고,
+            # MainProcessor에 일임하여 백엔드 파이프라인이 전담하도록 구조 변경됨
             for idx, file_path in enumerate(files_to_process, start=1):
                 file_name = os.path.basename(file_path)
-                ext = os.path.splitext(file_path)[1].lower()
+                self.progress.emit(f"백엔드 AI 분석 중 ({idx}/{total_count}): {file_name}")
                 
-                self.progress.emit(f"분석 중 ({idx}/{total_count}): {file_name}")
-
-                metadata = self.get_file_metadata(file_path)
-                tags_and_comment = "#분석실패 / 코멘트: 내용을 읽을 수 없습니다."
-
-                # --- [A. 이미지 파일 분석 로직] ---
-                if ext in image_exts:
-                    try:
-                        # PIL을 사용해 한글 경로 파일 안전하게 오픈 및 RGB 변환
-                        with Image.open(file_path) as img:
-                            img = img.convert("RGB")
-                            img.thumbnail((768, 768)) # 경량화를 위해 가로세로 최대 768px 축소
-                            
-                            buffer = io.BytesIO()
-                            img.save(buffer, format="JPEG", quality=80)
-                            img_bytes = buffer.getvalue()
-
-                        vision_prompt = "이 이미지의 핵심 내용을 분석해서 주요 태그 3개(#태그)와 한 줄 요약을 작성해줘."
-                        
-                        response = ollama.chat(
-                            model=self.vision_model,
-                            messages=[{
-                                'role': 'user', 
-                                'content': vision_prompt, 
-                                'images': [img_bytes]
-                            }],
-                            options={'temperature': 0.2, 'num_predict': 150}
-                        )
-                        tags_and_comment = response.get('message', {}).get('content', '').strip()
-                    except Exception as img_err:
-                        tags_and_comment = f"Vision AI 분석 실패: {img_err}"
-
-                # --- [B. 텍스트/PDF 문서 분석 로직] ---
-                else:
-                    content = self.extract_text(file_path)
-                    if content:
-                        prompt = f"""
-다음 파일의 메타데이터와 본문 내용을 종합적으로 분석하여, 가장 적절한 태그 3개와 한 줄 요약 코멘트를 작성해라.
-
-[파일 메타데이터]
-- 파일명: {file_name}
-- 파일 크기: {metadata['size']}
-- 최종 수정일자: {metadata['modified_time']}
-
-[출력 형식 예시]
-태그: #데이터, #파이썬, #GUI / 코멘트: 파이썬 기반 GUI 프로그램 설계 문서입니다.
-
-[문서 내용]
-{content[:800]}
-"""
-                        try:
-                            response = ollama.chat(
-                                model=self.text_model,
-                                messages=[{'role': 'user', 'content': prompt}],
-                                options={'num_predict': 100, 'temperature': 0.2}
-                            )
-                            tags_and_comment = response.get('message', {}).get('content', '').strip()
-                        except Exception as llm_err:
-                            tags_and_comment = f"LLM 연동 실패: {llm_err}"
-
-                # DB 저장
-                self.save_to_db(file_name, file_path, tags_and_comment)
+                self.main_processor.process_file_upload(file_path)
 
             self.finished.emit()
 
         except Exception as e:
             self.error.emit(f"스캔 및 태깅 작업 중 오류 발생: {str(e)}")
 
-    def get_file_metadata(self, path):
-        """파일의 메타데이터(크기, 수정시간, 확장자)를 구하는 함수"""
+
+# =========================================================
+# [5] 자연어 파싱 전용 백그라운드 스레드 (QueryParseWorker) - 🌟 [신규 추가]
+# =========================================================
+class QueryParseWorker(QThread):
+    """자연어 검색어 입력 시 UI 멈춤을 방지하기 위한 비동기 파싱 스레드"""
+    finished = Signal(dict) 
+    error = Signal(str)     
+
+    def __init__(self, user_text, query_parser):
+        super().__init__()
+        self.user_text = user_text
+        self.query_parser = query_parser
+
+    def run(self):
         try:
-            stat = os.stat(path)
-            file_size_kb = round(stat.st_size / 1024, 2)
-            mtime = datetime.datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')
-            return {
-                "size": f"{file_size_kb} KB",
-                "modified_time": mtime,
-                "extension": os.path.splitext(path)[1].lower()
-            }
-        except Exception:
-            return {"size": "알 수 없음", "modified_time": "알 수 없음", "extension": "알 수 없음"}
-
-    def extract_text(self, path):
-        """TXT 및 PDF 문서 파일로부터 텍스트를 추출하는 함수"""
-        ext = os.path.splitext(path)[1].lower()
-        try:
-            if ext == '.txt':
-                with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                    return f.read()
-            elif ext == '.pdf':
-                reader = PdfReader(path)
-                text = ""
-                for page in reader.pages:
-                    text += page.extract_text() or ""
-                return text
-        except Exception:
-            return None
-        return None
-
-    def save_to_db(self, file_name, file_path, ai_comment):
-        """분석된 결과를 SQLite DB 파일에 저장(Upsert)하는 함수"""
-        db_path = getattr(self.service.db, 'db_name', 'file_manager.db')
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS files (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                file_name TEXT,
-                file_path TEXT UNIQUE,
-                ai_comment TEXT,
-                category TEXT
-            )
-        ''')
-
-        cursor.execute('''
-            INSERT INTO files (file_name, file_path, ai_comment, category)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(file_path) DO UPDATE SET
-                file_name=excluded.file_name,
-                ai_comment=excluded.ai_comment
-        ''', (file_name, file_path, ai_comment, "AI 태그 완료"))
-
-        conn.commit()
-        conn.close()
+            result = self.query_parser.parse_user_query(self.user_text)
+            self.finished.emit(result)
+        except Exception as e:
+            self.error.emit(f"자연어 파싱 처리 중 오류: {str(e)}")
 
 
 # =========================================================
-# [5] 메인 GUI 화면 클래스 (MainWindow)
+# [6] 메인 GUI 화면 클래스 (MainWindow)
 # =========================================================
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.service = BackendService()
+        self.db_path = getattr(self.service.db, 'db_name', 'file_manager.db')
 
-        # 창 제목 및 초기 크기 설정
+        # 🌟 [신규] 백엔드 관제탑 및 분석 부품 초기화 결합
+        self.extractor = TextExtractor(max_chars=2000)
+        self.analyzer = FileAnalyzer(text_model="qwen2.5:3b", vision_model="llava")
+        
+        self.query_parser = SearchQueryParser(model="qwen2.5:3b") if HAS_QUERY_PARSER else None
+        
+        self.main_processor = MainProcessor(
+            extractor=self.extractor,
+            analyzer=self.analyzer,
+            query_parser=self.query_parser,
+            db_path=self.db_path
+        )
+
+        self.search_engine = SearchEngine(db_path=self.db_path) if HAS_SEARCH_ENGINE else None
+
         self.setWindowTitle("로컬 멀티모달 LLM 기반 파일 자동 태깅 Viewer")
-        self.setGeometry(100, 100, 1000, 550)
+        self.setGeometry(100, 100, 1100, 650) # 창 크기 확장
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -227,9 +166,32 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout()
         central_widget.setLayout(main_layout)
 
-        # [상단 영역: 버튼 및 경로 표시 라벨]
-        top_layout = QHBoxLayout()
+        # 🌟 [신규] A. 상단 자연어 검색어 영역 추가
+        search_layout = QHBoxLayout()
+        self.lbl_search = QLabel("💬 자연어 검색:")
+        self.lbl_search.setStyleSheet("font-weight: bold;")
         
+        self.input_search = QLineEdit()
+        self.input_search.setPlaceholderText("예: 지난주 작성한 프로젝트 pdf 파일 찾아줘 / 오늘 날씨 어때?")
+        self.input_search.setStyleSheet("padding: 6px; font-size: 13px;")
+        self.input_search.returnPressed.connect(self.test_query_parsing)
+
+        self.btn_parse = QPushButton("🔍 AI 검색 / 대화 실행")
+        self.btn_parse.setStyleSheet("font-weight: bold; padding: 6px 12px; background-color: #4CAF50; color: white;")
+        self.btn_parse.clicked.connect(self.test_query_parsing)
+
+        self.btn_show_all = QPushButton("🔄 전체 목록 보기")
+        self.btn_show_all.setStyleSheet("padding: 6px; background-color: #757575; color: white;")
+        self.btn_show_all.clicked.connect(self.load_db_to_table)
+
+        search_layout.addWidget(self.lbl_search)
+        search_layout.addWidget(self.input_search)
+        search_layout.addWidget(self.btn_parse)
+        search_layout.addWidget(self.btn_show_all)
+        main_layout.addLayout(search_layout)
+
+        # B. 중단 폴더 선택 및 DB 제어 영역
+        top_layout = QHBoxLayout()
         self.btn_select_folder = QPushButton("📂 폴더 선택 및 고정밀 AI 태깅 시작")
         self.btn_select_folder.setStyleSheet("font-weight: bold; padding: 8px; background-color: #2196F3; color: white;")
         self.btn_select_folder.clicked.connect(self.select_and_process_folder)
@@ -245,19 +207,13 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(self.lbl_path)
         top_layout.addStretch()
         top_layout.addWidget(self.btn_reset)
-
         main_layout.addLayout(top_layout)
 
-        # [하단 영역: 파일 데이터 표시용 테이블]
+        # C. 하단 파일 목록 디스플레이 표(Table) 영역
         self.table = QTableWidget()
         self.table.setColumnCount(5)
-        # 테이블 컬럼 헤더 설정 (Index 0: ID, 1: 파일명, 2: 파일 경로, 3: 코멘트, 4: 카테고리)
         self.table.setHorizontalHeaderLabels(["ID", "파일명", "파일 경로", "로컬 LLM/Vision 분석 코멘트", "카테고리"])
-        
-        # 테이블의 셀을 더블클릭했을 때 반응할 연결 함수(이벤트) 설정
         self.table.itemDoubleClicked.connect(self.open_file_on_double_click)
-        
-        # 테이블 내 텍스트가 셀 너비를 넘어가도 잘리지 않고 자동 줄바꿈되도록 설정
         self.table.setWordWrap(True)
 
         header = self.table.horizontalHeader()
@@ -271,141 +227,174 @@ class MainWindow(QMainWindow):
         self.load_db_to_table()
 
     def select_and_process_folder(self):
-        """'폴더 선택' 버튼 클릭 시 탐색기를 띄우고 스레드를 시작하는 함수"""
         folder_path = QFileDialog.getExistingDirectory(self, "스캔 및 AI 태깅을 진행할 폴더 선택")
-        
         if folder_path:
-            self.btn_select_folder.setEnabled(False)
-            self.lbl_path.setText(f"선택된 폴더: {folder_path} (AI 모델 분석 준비 중...)")
-
-            # 백그라운드 Worker 스레드 생성 및 실행
-            self.worker = FolderScanAndTagWorker(
-                folder_path=folder_path, 
-                service=self.service, 
-                text_model="qwen2.5:3b",
-                vision_model="llava"
-            )
+            clean_folder_path = folder_path.replace('￥', '/').replace('\\', '/')
+            clean_folder_path = os.path.abspath(os.path.normpath(clean_folder_path))
             
+            self.btn_select_folder.setEnabled(False)
+            self.lbl_path.setText(f"선택된 폴더: {clean_folder_path} (백엔드 파이프라인 분석 준비 중...)")
+
+            # 🌟 [변경] MainProcessor 인스턴스를 스레드에 전달하도록 수정됨
+            self.worker = FolderScanAndTagWorker(
+                folder_path=clean_folder_path,
+                main_processor=self.main_processor,
+                service=self.service
+            )
             self.worker.progress.connect(self.on_scan_progress)
             self.worker.finished.connect(self.on_scan_finished)
             self.worker.error.connect(self.on_scan_error)
-            
             self.worker.start()
 
     def on_scan_progress(self, status_text):
-        """스레드가 작업 중 진행 상태를 보낼 때 UI 라벨과 테이블을 갱신하는 함수"""
         self.lbl_path.setText(status_text)
         self.load_db_to_table()
 
     def on_scan_finished(self):
-        """모든 분석 작업이 정상 종료되었을 때 호출되는 함수"""
         self.load_db_to_table()
         self.btn_select_folder.setEnabled(True)
-        self.lbl_path.setText("상태: 모든 파일의 고정밀 AI 분석 완료!")
+        self.lbl_path.setText("상태: 모든 파일의 백엔드 AI 분석 및 태깅 완료!")
         QMessageBox.information(self, "완료", "폴더 내부 파일 분석 및 로컬 AI 태깅 저장이 완료되었습니다!")
 
     def on_scan_error(self, err_msg):
-        """작업 도중 오류가 발생했을 때 호출되는 함수"""
         self.btn_select_folder.setEnabled(True)
         self.lbl_path.setText("상태: 작업 중 오류 발생")
         QMessageBox.critical(self, "오류", err_msg)
 
+    # ---------------------------------------------------------
+    # 🌟 [신규 추가] 자연어 검색 및 파싱 이벤트 핸들러 메서드들
+    # ---------------------------------------------------------
+    def test_query_parsing(self):
+        user_text = self.input_search.text().strip()
+        if not user_text:
+            QMessageBox.warning(self, "경고", "검색어나 대화 내용을 입력해 주세요.")
+            return
+
+        if not HAS_QUERY_PARSER or self.query_parser is None:
+            QMessageBox.critical(self, "오류", "query_parser.py 모듈을 찾을 수 없습니다.")
+            return
+
+        self.btn_parse.setEnabled(False)
+        self.btn_parse.setText("⏳ AI 처리 중...")
+
+        self.parse_worker = QueryParseWorker(user_text, self.query_parser)
+        self.parse_worker.finished.connect(self.on_query_parse_finished)
+        self.parse_worker.error.connect(self.on_query_parse_error)
+        self.parse_worker.start()
+
+    def on_query_parse_finished(self, result_dict):
+        self.btn_parse.setEnabled(True)
+        self.btn_parse.setText("🔍 AI 검색 / 대화 실행")
+
+        parsed_data = result_dict.get("data", {})
+        if HAS_SEARCH_ENGINE and self.search_engine:
+            execution_result = self.search_engine.process_query_result(parsed_data)
+            action = execution_result.get("action")
+            message = execution_result.get("message", "")
+            data_list = execution_result.get("data", [])
+
+            if action == "UPDATE_TABLE":
+                self.update_table_with_search_results(data_list)
+                self.lbl_path.setText(f"검색 결과: {message}")
+            elif action == "SHOW_CHAT":
+                QMessageBox.information(self, "🤖 AI 대화 응답", message)
+            else:
+                QMessageBox.warning(self, "알림", f"처리 결과: {message}")
+        else:
+            formatted_json = json.dumps(result_dict, ensure_ascii=False, indent=2)
+            QMessageBox.information(self, "파싱 결과", formatted_json)
+
+    def on_query_parse_error(self, err_msg):
+        self.btn_parse.setEnabled(True)
+        self.btn_parse.setText("🔍 AI 검색 / 대화 실행")
+        QMessageBox.critical(self, "파싱 오류", err_msg)
+
+    def update_table_with_search_results(self, rows):
+        self.table.setRowCount(len(rows))
+        for row_idx, row_data in enumerate(rows):
+            for col_idx, value in enumerate(row_data):
+                item = QTableWidgetItem(str(value) if value is not None else "")
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.table.setItem(row_idx, col_idx, item)
+
     def load_db_to_table(self):
-        """SQLite DB 파일에 저장된 태깅 정보를 읽어서 화면의 QTableWidget 표에 채워 넣는 함수"""
-        db_path = getattr(self.service.db, 'db_name', 'file_manager.db')
         try:
-            conn = sqlite3.connect(db_path)
+            conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute("SELECT id, file_name, file_path, ai_comment, category FROM files")
             rows = cursor.fetchall()
             conn.close()
 
             self.table.setRowCount(len(rows))
-            
             for row_idx, row_data in enumerate(rows):
                 for col_idx, value in enumerate(row_data):
                     item = QTableWidgetItem(str(value) if value is not None else "")
-                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)  # 셀 내용 직접 수정 불가 처리
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                     self.table.setItem(row_idx, col_idx, item)
+            
+            self.lbl_path.setText("상태: 전체 DB 파일 목록 출력 중")
         except Exception:
             self.table.setRowCount(0)
 
+    # ---------------------------------------------------------
+    # 🌟 [핵심 변경] WinError 32 점유 에러 방어용 SQL 초기화 로직
+    # ---------------------------------------------------------
     def reset_db_and_path(self):
-        """DB 데이터 삭제 및 리셋 함수"""
+        """
+        - 기존: os.remove(db_path)를 사용하여 물리 파일을 삭제하려다 프로세스 점유로 WinError 32 발생
+        - 수정: 파일을 지우지 않고 SQL DELETE문과 sqlite_sequence를 초기화하여 에러를 근본적으로 방어
+        """
         reply = QMessageBox.question(
-            self, 
-            "DB 삭제 확인", 
+            self, "DB 삭제 확인", 
             "정말로 저장된 파일 분석 DB를 삭제하고 초기화하시겠습니까?",
-            QMessageBox.Yes | QMessageBox.No, 
-            QMessageBox.No
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
 
         if reply == QMessageBox.Yes:
-            db_path = getattr(self.service.db, 'db_name', 'file_manager.db')
             try:
-                if os.path.exists(db_path):
-                    os.remove(db_path)
-                
-                conn = sqlite3.connect(db_path)
+                conn = sqlite3.connect(self.db_path)
                 cursor = conn.cursor()
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS files (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        file_name TEXT,
-                        file_path TEXT UNIQUE,
-                        ai_comment TEXT,
-                        category TEXT
-                    )
-                ''')
+                cursor.execute("CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY AUTOINCREMENT, file_name TEXT, file_path TEXT UNIQUE, ai_comment TEXT, category TEXT)")
+                cursor.execute("DELETE FROM files;")
+                cursor.execute("DELETE FROM sqlite_sequence WHERE name='files';") # ID 인덱스 리셋
                 conn.commit()
-                conn.close()
+                conn.close() # 명시적 세션 종료
 
                 self.lbl_path.setText("선택된 폴더: 없음")
                 self.table.setRowCount(0)
-                QMessageBox.information(self, "초기화 완료", "DB 파일 삭제 및 경로 초기화가 완료되었습니다!")
+                QMessageBox.information(self, "초기화 완료", "DB 데이터 및 상태 초기화가 성공적으로 완료되었습니다!")
             except Exception as e:
-                QMessageBox.critical(self, "오류", f"DB 삭제 중 오류 발생: {e}")
+                QMessageBox.critical(self, "오류", f"DB 초기화 처리 중 오류 발생: {str(e)}")
 
     def open_file_on_double_click(self, item: QTableWidgetItem):
-        """[핵심 수정] 테이블 내 특정 셀을 더블클릭했을 때 발생하는 이벤트 함수
-        
-        - 클릭한 위치(Column)가 3번 열(로컬 LLM/Vision 분석 코멘트)인 경우:
-          -> 잘린 전체 문장을 모달 팝업 메시지창(QMessageBox)으로 보여줍니다.
-        - 그 외의 열(예: 파일 경로 등)을 클릭한 경우:
-          -> 해당 파일 경로를 찾아 기본 윈도우 프로그램으로 오픈합니다.
-        """
-        row = item.row()     # 사용자가 더블클릭한 행(Row) 번호 (0, 1, 2, ...)
-        col = item.column()  # 사용자가 더블클릭한 열(Column) 번호 (0: ID, 1: 파일명, 2: 파일경로, 3: 코멘트)
+        row = item.row()
+        col = item.column()
 
-        # 1. 사용자가 더블클릭한 칸이 '3번 열(AI 코멘트)'인 경우
         if col == 3:
-            file_name_item = self.table.item(row, 1)  # 같은 행의 1번 열(파일명) 추출
+            file_name_item = self.table.item(row, 1)
             file_name = file_name_item.text() if file_name_item else "알 수 없는 파일"
-            comment_text = item.text()                 # 현재 더블클릭한 3번 셀의 전체 텍스트 원문
+            comment_text = item.text()
 
-            # 전체 내용 표시용 팝업 메시지 창 생성
             msg_box = QMessageBox(self)
             msg_box.setWindowTitle(f"상세 분석 결과 - {file_name}")
             msg_box.setText(comment_text)
             msg_box.setIcon(QMessageBox.Information)
-            msg_box.exec()  # 팝업창 출력
-
-        # 2. 그 외의 열(특히 2번 열: 파일 경로)을 더블클릭한 경우 (기존 파일 실행 로직)
+            msg_box.exec()
         else:
-            file_path_item = self.table.item(row, 2)  # 같은 행의 2번 열(파일 경로) 추출
+            file_path_item = self.table.item(row, 2)
             if file_path_item:
-                file_path = file_path_item.text()
-                if os.path.exists(file_path):
-                    # 시스템 기본 응용프로그램으로 연결하여 파일 실행
-                    url = QUrl.fromLocalFile(file_path)
+                raw_file_path = file_path_item.text()
+                # 🌟 [개선] 경로 문자 정제 후 파일 존재 여부 검사 및 실행
+                clean_path = raw_file_path.replace('￥', '/').replace('\\', '/')
+                clean_path = os.path.abspath(os.path.normpath(clean_path))
+
+                if os.path.exists(clean_path):
+                    url = QUrl.fromLocalFile(clean_path)
                     QDesktopServices.openUrl(url)
                 else:
-                    QMessageBox.warning(self, "경고", f"파일을 찾을 수 없습니다:\n{file_path}")
+                    QMessageBox.warning(self, "경고", f"파일을 찾을 수 없습니다:\n{clean_path}")
 
 
-# =========================================================
-# [6] 실행 엔트리 포인트
-# =========================================================
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = MainWindow()
